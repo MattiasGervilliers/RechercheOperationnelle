@@ -9,6 +9,15 @@ import matplotlib.cm as cm
 import math
 import random
 import json
+import networkx as nx
+
+def is_connected(enriched):
+    G = nx.Graph()
+    for node_id, attrs in enriched.items():
+        G.add_node(node_id)
+        for neighbor_id in attrs['neighbours']:
+            G.add_edge(node_id, neighbor_id)
+    return nx.is_connected(G), G
 
 def build_logical_graph_data(
     data,
@@ -34,7 +43,7 @@ def build_logical_graph_data(
       max_village_dist : distance max pour relier deux villages (None = pas de filtre)
     """
     enriched = {}
-
+    
     # 1) Initialisation des nœuds
     for hub_id, hub in data.items():
         enriched[hub_id] = {'x': hub['x'], 'y': hub['y'],
@@ -44,6 +53,7 @@ def build_logical_graph_data(
             enriched[vid] = {'x': coord['x'], 'y': coord['y'],
                              'cluster': hub_id, 'neighbours': {}}
 
+    degres_max_hub = 4
     # 2) Connexions hub–hub
     hubs = [n for n in enriched if isinstance(n, int)]
     for i in range(len(hubs)):
@@ -52,12 +62,18 @@ def build_logical_graph_data(
             xa, ya = enriched[a]['x'], enriched[a]['y']
             xb, yb = enriched[b]['x'], enriched[b]['y']
             dist = math.hypot(xa-xb, ya-yb)
+
+            # Degrés actuels des hubs
+            deg_a = len(enriched[a]['neighbours'])
+            deg_b = len(enriched[b]['neighbours'])
+
             if dist < hub_dist_thresh and random.random() < p_hub:
-                if max_village_dist is not None and dist > max_village_dist/2:
+                if (deg_a >= degres_max_hub or deg_b >= degres_max_hub):
                     continue
                 enriched[a]['neighbours'].setdefault(b, []).append(dist)
                 enriched[b]['neighbours'].setdefault(a, []).append(dist)
 
+    degres_max_vil = 3
     # 3) Connexion village–hub parent
     for hub_id, hub in data.items():
         for sv_id in hub.get('sousVilles', {}):
@@ -65,8 +81,14 @@ def build_logical_graph_data(
             xa, ya = enriched[hub_id]['x'], enriched[hub_id]['y']
             xb, yb = enriched[vid]['x'], enriched[vid]['y']
             dist = math.hypot(xa-xb, ya-yb)
-            if max_village_dist is not None and dist > max_village_dist/4:
+
+            # Degrés actuels des hubs
+            deg_hub = len(enriched[hub_id]['neighbours'])
+            deg_vil = len(enriched[vid]['neighbours'])
+
+            if  (deg_hub >= degres_max_hub or deg_vil >= degres_max_vil):
                 continue
+            
             enriched[hub_id]['neighbours'].setdefault(vid, []).append(dist)
             enriched[vid]['neighbours'].setdefault(hub_id, []).append(dist)
 
@@ -80,15 +102,51 @@ def build_logical_graph_data(
             if u == v: continue
             xu, yu = enriched[u]['x'], enriched[u]['y']
             dist = math.hypot(xv-xu, yv-yu)
+
+            # Degrés actuels des hubs
+            deg_a = len(enriched[v]['neighbours'])
+            deg_b = len(enriched[u]['neighbours'])
+
             # si un filtre existe, on ignore les trop lointains
-            if max_village_dist is not None and dist > max_village_dist/2:
+            if  (deg_a >= degres_max_vil or deg_b >= degres_max_vil):
                 continue
             dists.append((dist, u))
         dists.sort(key=lambda t: t[0])
         # on ne prend que les k plus proches admissibles
-        for dist, u in dists[:k_villages]:
+        for dist, u in dists:
+            deg_v = len(enriched[v]['neighbours'])
+            deg_u = len(enriched[u]['neighbours'])
+            if deg_v >= degres_max_vil or deg_u >= degres_max_vil:
+                continue
             enriched[v]['neighbours'].setdefault(u, []).append(dist)
             enriched[u]['neighbours'].setdefault(v, []).append(dist)
+            if len(enriched[v]['neighbours']) >= degres_max_vil:
+                break
+    
+    #rend le graphe connexe au cas ou il ne l'est pas 
+    isConnected, G = is_connected(enriched)
+    if not isConnected:
+        components = list(nx.connected_components(G))
+        if len(components) > 1:
+            for i in range(len(components) - 1):
+                A = components[i]
+                B = components[i + 1]
+
+                # Relier un nœud de A à un nœud de B (le plus proche)
+                min_dist = float('inf')
+                best_a, best_b = None, None
+                for a in A:
+                    for b in B:
+                        dx = enriched[a]['x'] - enriched[b]['x']
+                        dy = enriched[a]['y'] - enriched[b]['y']
+                        d = math.hypot(dx, dy)
+                        if d < min_dist:
+                            min_dist = d
+                            best_a, best_b = a, b
+
+                # Connecter manuellement
+                enriched[best_a]['neighbours'].setdefault(best_b, []).append(min_dist)
+                enriched[best_b]['neighbours'].setdefault(best_a, []).append(min_dist)
 
     return enriched
 
@@ -325,10 +383,10 @@ def generate_sub_cities(data,nb_max_ville, surface_max):
         center_y = city['y']
         all_cities += 1
 
-        nb_min_ville = 5
+        nb_min_ville = nb_max_sub_cities_per_city//2
         surface = (max_x - min_x) * (max_y - min_y)
         howBig = surface / surface_max * 100
-        nb = max(6, int(4 * howBig))
+        nb = int(4 * howBig)
         if nb > nb_max_ville:
             nb_max_ville = nb_max_ville
         n_points = random.randrange(nb_min_ville, nb_max_ville)
@@ -350,7 +408,7 @@ def generate_sub_cities(data,nb_max_ville, surface_max):
 
             all_cities += 1
             city['sousVilles'][i] = {'x': x, 'y': y}
-
+    
     return data, all_cities
 
 def generate_cities(MIN_X, MAX_X, MIN_Y, MAX_Y, nb_villes):
