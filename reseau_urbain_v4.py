@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import random
 import matplotlib.pyplot as plt
 import pprint
@@ -27,35 +24,42 @@ def build_logical_graph_data(
     max_village_dist=None
 ):
     """
-    Enrichit `data` en y ajoutant, pour chaque hub et chaque village :
-      - 'cluster' : l'ID du hub d'origine
-      - 'neighbours' : dict { voisin_id: [poids,...], ... }
-    Params :
-      data : {
-        hub_id: {
-          'x': float, 'y': float,
-          'sousVilles': {sv_id: {'x','y'}, …}
-        }, …
-      }
-      p_hub : probabilité de connexion hubs–hubs quand dist < hub_dist_thresh
-      hub_dist_thresh : distance max pour relier deux hubs
-      k_villages : nombre de plus proches villages à relier
-      max_village_dist : distance max pour relier deux villages (None = pas de filtre)
+    Enrichit `data` en lui attribuant des IDs entiers pour hubs et sous‑villes,
+    et construit pour chaque nœud :
+      - 'cluster'    : ID du hub d'origine
+      - 'neighbours' : dict {voisin_id: [poids,...], ...}
     """
     enriched = {}
-    
-    # 1) Initialisation des nœuds
+    vid_map = {}   # map (hub_id, sv_id) → new int ID
+    next_vid = 0
+
+    # 1) Assignation des IDs et initialisation des hubs
     for hub_id, hub in data.items():
-        enriched[hub_id] = {'x': hub['x'], 'y': hub['y'],
-                            'cluster': hub_id, 'neighbours': {}}
+        vid_map[(hub_id, None)] = next_vid
+        enriched[next_vid] = {
+            'x': hub['x'], 'y': hub['y'],
+            'cluster': next_vid,
+            'neighbours': {},
+            'distance': 99999
+        }
+        next_vid += 1
+
+    # 2) Assignation des IDs et initialisation des sous‑villes
+    for hub_id, hub in data.items():
+        hub_vid = vid_map[(hub_id, None)]
         for sv_id, coord in hub.get('sousVilles', {}).items():
-            vid = f"{hub_id}.{sv_id}"
-            enriched[vid] = {'x': coord['x'], 'y': coord['y'],
-                             'cluster': hub_id, 'neighbours': {}}
+            vid_map[(hub_id, sv_id)] = next_vid
+            enriched[next_vid] = {
+                'x': coord['x'], 'y': coord['y'],
+                'cluster': hub_vid,
+                'neighbours': {},
+                'distance': 99999
+            }
+            next_vid += 1
 
     degres_max_hub = 4
-    # 2) Connexions hub–hub
-    hubs = [n for n in enriched if isinstance(n, int)]
+    # 3) Connexions hub–hub
+    hubs = [v for (h, sv), v in vid_map.items() if sv is None]
     for i in range(len(hubs)):
         for j in range(i+1, len(hubs)):
             a, b = hubs[i], hubs[j]
@@ -63,90 +67,72 @@ def build_logical_graph_data(
             xb, yb = enriched[b]['x'], enriched[b]['y']
             dist = math.hypot(xa-xb, ya-yb)
 
-            # Degrés actuels des hubs
-            deg_a = len(enriched[a]['neighbours'])
-            deg_b = len(enriched[b]['neighbours'])
-
+            da = len(enriched[a]['neighbours'])
+            db = len(enriched[b]['neighbours'])
             if dist < hub_dist_thresh and random.random() < p_hub:
-                if (deg_a >= degres_max_hub or deg_b >= degres_max_hub):
-                    continue
-                enriched[a]['neighbours'].setdefault(b, []).append(dist)
-                enriched[b]['neighbours'].setdefault(a, []).append(dist)
+                if da < degres_max_hub and db < degres_max_hub:
+                    enriched[a]['neighbours'].setdefault(b, []).append(dist)
+                    enriched[b]['neighbours'].setdefault(a, []).append(dist)
 
     degres_max_vil = 3
-    # 3) Connexion village–hub parent
+    # 4) Connexion sous‑ville ↔ hub parent
     for hub_id, hub in data.items():
+        hub_vid = vid_map[(hub_id, None)]
         for sv_id in hub.get('sousVilles', {}):
-            vid = f"{hub_id}.{sv_id}"
-            xa, ya = enriched[hub_id]['x'], enriched[hub_id]['y']
+            vid = vid_map[(hub_id, sv_id)]
+            xa, ya = enriched[hub_vid]['x'], enriched[hub_vid]['y']
             xb, yb = enriched[vid]['x'], enriched[vid]['y']
             dist = math.hypot(xa-xb, ya-yb)
 
-            # Degrés actuels des hubs
-            deg_hub = len(enriched[hub_id]['neighbours'])
-            deg_vil = len(enriched[vid]['neighbours'])
+            dh = len(enriched[hub_vid]['neighbours'])
+            dv = len(enriched[vid]['neighbours'])
+            if dh < degres_max_hub and dv < degres_max_vil:
+                enriched[hub_vid]['neighbours'].setdefault(vid, []).append(dist)
+                enriched[vid]['neighbours'].setdefault(hub_vid, []).append(dist)
 
-            if  (deg_hub >= degres_max_hub or deg_vil >= degres_max_vil):
-                continue
-            
-            enriched[hub_id]['neighbours'].setdefault(vid, []).append(dist)
-            enriched[vid]['neighbours'].setdefault(hub_id, []).append(dist)
-
-    # 4) Connexion village–village
-    villages = [n for n in enriched if isinstance(n, str)]
+    # 5) Connexion sous‑ville ↔ sous‑ville
+    villages = [v for (h, sv), v in vid_map.items() if sv is not None]
     for v in villages:
         xv, yv = enriched[v]['x'], enriched[v]['y']
-        # distances à tous les autres villages
+        # calculer distances aux autres sous‑villes
         dists = []
         for u in villages:
             if u == v: continue
             xu, yu = enriched[u]['x'], enriched[u]['y']
             dist = math.hypot(xv-xu, yv-yu)
-
-            # Degrés actuels des hubs
-            deg_a = len(enriched[v]['neighbours'])
-            deg_b = len(enriched[u]['neighbours'])
-
-            # si un filtre existe, on ignore les trop lointains
-            if  (deg_a >= degres_max_vil or deg_b >= degres_max_vil):
+            if max_village_dist is not None and dist > max_village_dist:
                 continue
-            dists.append((dist, u))
-        dists.sort(key=lambda t: t[0])
-        # on ne prend que les k plus proches admissibles
-        for dist, u in dists:
-            deg_v = len(enriched[v]['neighbours'])
-            deg_u = len(enriched[u]['neighbours'])
-            if deg_v >= degres_max_vil or deg_u >= degres_max_vil:
-                continue
-            enriched[v]['neighbours'].setdefault(u, []).append(dist)
-            enriched[u]['neighbours'].setdefault(v, []).append(dist)
             if len(enriched[v]['neighbours']) >= degres_max_vil:
                 break
-    
-    #rend le graphe connexe au cas ou il ne l'est pas 
-    isConnected, G = is_connected(enriched)
-    if not isConnected:
-        components = list(nx.connected_components(G))
-        if len(components) > 1:
-            for i in range(len(components) - 1):
-                A = components[i]
-                B = components[i + 1]
+            if len(enriched[u]['neighbours']) >= degres_max_vil:
+                continue
+            dists.append((dist, u))
+        # relier aux k plus proches
+        dists.sort(key=lambda t: t[0])
+        for dist, u in dists[:k_villages]:
+            enriched[v]['neighbours'].setdefault(u, []).append(dist)
+            enriched[u]['neighbours'].setdefault(v, []).append(dist)
 
-                # Relier un nœud de A à un nœud de B (le plus proche)
-                min_dist = float('inf')
-                best_a, best_b = None, None
-                for a in A:
-                    for b in B:
-                        dx = enriched[a]['x'] - enriched[b]['x']
-                        dy = enriched[a]['y'] - enriched[b]['y']
-                        d = math.hypot(dx, dy)
-                        if d < min_dist:
-                            min_dist = d
-                            best_a, best_b = a, b
-
-                # Connecter manuellement
-                enriched[best_a]['neighbours'].setdefault(best_b, []).append(min_dist)
-                enriched[best_b]['neighbours'].setdefault(best_a, []).append(min_dist)
+    # 6) Assurer la connexité
+    G = nx.Graph()
+    for vid, attrs in enriched.items():
+        G.add_node(vid)
+        for neigh, w in attrs['neighbours'].items():
+            G.add_edge(vid, neigh)
+    if not nx.is_connected(G):
+        comps = list(nx.connected_components(G))
+        for c1, c2 in zip(comps, comps[1:]):
+            best = (None, None, float('inf'))
+            for a in c1:
+                for b in c2:
+                    dx = enriched[a]['x'] - enriched[b]['x']
+                    dy = enriched[a]['y'] - enriched[b]['y']
+                    d = math.hypot(dx, dy)
+                    if d < best[2]:
+                        best = (a, b, d)
+            a, b, d = best
+            enriched[a]['neighbours'].setdefault(b, []).append(d)
+            enriched[b]['neighbours'].setdefault(a, []).append(d)
 
     return enriched
 
@@ -308,16 +294,16 @@ def display(data, MIN_X, MAX_X, MIN_Y, MAX_Y):
 
 def plot_graph_data(data, figsize=(8, 8),
                     base_hub_size=200, base_vill_size=20,
-                    size_factor=50):
+                    size_factor=50, title = 'Gaphe'):
     """
-    Affiche chaque nœud en taille proportionnelle à son nombre d'arêtes (degree).
-    - base_hub_size : taille min pour un hub
-    - base_vill_size: taille min pour un village
-    - size_factor   : taille supplémentaire par arête
+    Affiche chaque nœud en taille proportionnelle à son degré.
+    - hubs : marker '^', taille de base base_hub_size
+    - villages : marker 'o', taille de base base_vill_size
+    - size_factor : ajout de taille par arête
     """
     fig, ax = plt.subplots(figsize=figsize)
 
-    # 1) Tracer les arêtes (une seule ligne par paire)
+    # 1) Tracer les arêtes
     drawn = set()
     for u, attrs in data.items():
         x1, y1 = attrs['x'], attrs['y']
@@ -328,39 +314,43 @@ def plot_graph_data(data, figsize=(8, 8),
             ax.plot([x1, x2], [y1, y2], color='gray', alpha=0.5)
             drawn.add((u, v))
 
-    # 2) Déterminer les clusters et leur couleur
+    # 2) Couleurs par cluster
     clusters = sorted({attrs['cluster'] for attrs in data.values()})
     cmap = plt.get_cmap('tab10', len(clusters))
     cluster_color = {c: cmap(i) for i, c in enumerate(clusters)}
 
-    # 3) Tracer les nœuds, avec taille selon le nombre d'arêtes
+    # 3) Tracer les nœuds
+    hub_plotted = False
+    vill_plotted = False
     for node_id, attrs in data.items():
         x, y = attrs['x'], attrs['y']
+        # degré = nombre d'arêtes
         deg = sum(len(w_list) for w_list in attrs['neighbours'].values())
-        # Choisir base size selon type
-        if isinstance(node_id, int):
+        # détecter hub vs village
+        is_hub = (attrs['cluster'] == node_id)
+        if is_hub:
             size = base_hub_size + size_factor * deg
             marker = '^'
-            label = f'Hub {node_id}'
+            label = 'Hub' if not hub_plotted else None
+            hub_plotted = True
         else:
             size = base_vill_size + size_factor * deg
             marker = 'o'
-            label = None
+            label = 'Village' if not vill_plotted else None
+            vill_plotted = True
 
         color = cluster_color[attrs['cluster']]
         ax.scatter(x, y, s=size, marker=marker,
                    color=color, edgecolor='black',
                    label=label)
-
         ax.text(x, y, str(node_id), fontsize=8,
                 ha='center', va='center', color='white')
 
     # 4) Finitions
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
-    ax.set_title('Graphe logique : taille des nœuds ∝ nombre d’arêtes')
-    ax.legend(loc='upper right', fontsize='small', ncol=2)
-    ax.grid(True)
+    ax.set_title(title)
+    ax.legend(loc='upper right', fontsize='small')
     plt.tight_layout()
     plt.show()
 
@@ -442,7 +432,9 @@ def main(nb_cities, nb_max_sub_cities_per_city, MIN_X, MAX_X, MIN_Y, MAX_Y, disp
             json.dump(data_final, f, ensure_ascii=False, indent=2)
        
     if display_graph:
-        plot_graph_data(data_final)
+        plot_graph_data(data_final, title = 'Graphe urbain : hubs')
+
+    return data_final
 
 if __name__ == "__main__":
 
@@ -455,4 +447,4 @@ if __name__ == "__main__":
     display_console = False
     save_json = True
 
-    main(nb_cities, nb_max_sub_cities_per_city, MIN_X, MAX_X, MIN_Y, MAX_Y, display_regions, display_graph, display_console, save_json)
+    graphe = main(nb_cities, nb_max_sub_cities_per_city, MIN_X, MAX_X, MIN_Y, MAX_Y, display_regions, display_graph, display_console, save_json)
